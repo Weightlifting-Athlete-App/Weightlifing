@@ -1,4 +1,4 @@
-# Weightlifing
+#  Biomechanical analysis for weightlifting performance enhancement
 
 Topic - Biomechanical analysis for weightlifting performance 
         enhancement
