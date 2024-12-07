@@ -26,6 +26,8 @@ Project Overviwe:    Weightlifting requires precise and efficient movement patte
 
 Architectural Diagram: ![image](https://github.com/user-attachments/assets/251b463b-f036-4535-8a3a-098dfdbcd0c9)
 
+Dependencies:
+
 
 
 
