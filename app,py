@@ -1,0 +1,166 @@
+import base64
+import cv2
+import numpy as np
+import mediapipe as mp
+import tempfile
+import os
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+
+#####################################
+# Import your processing modules for each exercise.
+#####################################
+# Squats:
+from process_frame import ProcessFrame         # Squats processing
+from thresholds import get_thresholds_beginner    # Squats thresholds
+
+# Elbow Flexion:
+from process_frame_elbow_flexion import ProcessFrameElbowFlexion
+from thresholds_elbow_flexion import get_thresholds_elbow_flexion
+
+# Elbow Extension:
+from process_frame_elbow_extension import ProcessFrameElbowExtension
+from thresholds_elbow_extension import get_thresholds_elbow_extension
+
+# Leg Extension:
+from process_frame_leg_extension import ProcessFrameLegExtension
+from thresholds_leg_extension import get_thresholds_leg_extension
+
+# Single get_mediapipe_pose for all exercises.
+from utils import get_mediapipe_pose
+
+app = Flask(__name__)
+CORS(app)
+
+#####################################
+# Initialize global processors and pose instances.
+#####################################
+# Squats:
+squats_thresholds = get_thresholds_beginner()
+squats_processor = ProcessFrame(squats_thresholds, flip_frame=False)
+pose_squats = get_mediapipe_pose()
+
+# Elbow Flexion:
+flexion_thresholds = get_thresholds_elbow_flexion()
+flexion_processor = ProcessFrameElbowFlexion(flexion_thresholds, flip_frame=False)
+pose_flexion = get_mediapipe_pose()
+
+# Elbow Extension:
+extension_thresholds = get_thresholds_elbow_extension()
+extension_processor = ProcessFrameElbowExtension(extension_thresholds, flip_frame=False)
+pose_extension = get_mediapipe_pose()
+
+# Leg Extension:
+leg_thresholds = get_thresholds_leg_extension()
+leg_processor = ProcessFrameLegExtension(leg_thresholds, flip_frame=False)
+pose_leg = get_mediapipe_pose()
+
+#####################################
+# Helper functions to decode/encode images.
+#####################################
+def decode_base64_image(image_data: str):
+    if "," in image_data:
+        _, image_data = image_data.split(",", 1)
+    img_bytes = base64.b64decode(image_data)
+    nparr = np.frombuffer(img_bytes, np.uint8)
+    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    return frame
+
+def encode_file_to_base64(filepath):
+    with open(filepath, "rb") as f:
+        encoded = base64.b64encode(f.read()).decode('utf-8')
+    return encoded
+
+#####################################
+# /processVideo endpoint: processes the entire video.
+#####################################
+@app.route("/processVideo", methods=["POST"])
+def process_video():
+    """
+    Expects JSON with:
+      - "video": base64-encoded video (e.g., MP4)
+      - "exercise": exercise id string ("squats", "elbowFlexion", "elbowExtension", "legExtension")
+    Processes the entire video (processing every frame) and returns final rep counts and the processed video.
+    """
+    data = request.get_json()
+    if "video" not in data or "exercise" not in data:
+        return jsonify({"error": "Missing video or exercise parameter"}), 400
+
+    exercise_id = data["exercise"]
+
+    # Choose processor and pose instance based on exercise id.
+    if exercise_id == "elbowFlexion":
+        processor = flexion_processor
+        pose_instance = pose_flexion
+    elif exercise_id == "elbowExtension":
+        processor = extension_processor
+        pose_instance = pose_extension
+    elif exercise_id == "legExtension":
+        processor = leg_processor
+        pose_instance = pose_leg
+    else:  # Default to squats.
+        processor = squats_processor
+        pose_instance = pose_squats
+
+    video_data = data["video"]
+    if "," in video_data:
+        _, video_data = video_data.split(",", 1)
+    try:
+        video_bytes = base64.b64decode(video_data)
+    except Exception as e:
+        return jsonify({"error": "Failed to decode video", "exception": str(e)}), 400
+
+    # Write the video bytes to a temporary file.
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp_in:
+        tmp_in.write(video_bytes)
+        input_filename = tmp_in.name
+
+    # Open the input video.
+    cap = cv2.VideoCapture(input_filename)
+    if not cap.isOpened():
+        os.remove(input_filename)
+        return jsonify({"error": "Could not open video file"}), 400
+
+    # Get video properties.
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if not fps or fps <= 0:
+        fps = 1
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    
+    # Create a temporary file for the output video.
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp_out:
+        output_filename = tmp_out.name
+
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(output_filename, fourcc, fps, (width, height))
+
+    # Process every frame.
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        processed_frame, _ = processor.process(frame, pose_instance)
+        out.write(processed_frame)
+    cap.release()
+    out.release()
+
+    # Encode the processed video file to base64.
+    annotated_video_base64 = encode_file_to_base64(output_filename)
+    
+    # Clean up temporary files.
+    os.remove(input_filename)
+    os.remove(output_filename)
+
+    result = {
+        "correct_reps": processor.state_tracker.get("CORRECT_REPS", processor.state_tracker.get("SQUAT_COUNT", 0)),
+        "incorrect_reps": processor.state_tracker.get("INCORRECT_REPS", processor.state_tracker.get("IMPROPER_SQUAT", 0)),
+        "annotated_video": f"data:video/mp4;base64,{annotated_video_base64}"
+    }
+    return jsonify(result)
+
+#####################################
+# MAIN
+#####################################
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)
